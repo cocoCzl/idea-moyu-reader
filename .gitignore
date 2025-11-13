@@ -1,7 +1,63 @@
+# OS files
 .DS_Store
-.gradle
-.idea
-.intellijPlatform
-.kotlin
-.qodana
-build
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Gradle
+.gradle/
+build/
+!build/*.md          # 如果你生成了文档可保留
+!build/README.md
+
+# IntelliJ IDEA
+.idea/
+!.idea/codeStyles/    # 可选：共享代码风格
+!.idea/codeStyles/codeStyleConfig.xml
+!.idea/inspectionProfiles/  # 可选：共享检查规则
+!.idea/misc.xml       # 可选：包含 JDK 语言级别等通用设置
+!.idea/vcs.xml        # ✅ 建议保留（标识 Git）
+!.idea/modules.xml    # ✅ 建议保留（模块结构）
+
+# IntelliJ Platform Plugin specific
+.intellijPlatform/
+.run/
+
+# Kotlin
+.kotlincache
+
+# Qodana
+.qodana/
+
+# Logs and databases
+*.log
+*.sqlite
+
+# Packages
+*.jar
+*.war
+*.ear
+
+# IntelliJ sandbox
+/idea-sandbox/
+
+# Local config (never commit)
+local.properties
+*.iml
+*.ipr
+*.iws
+
+# VS Code (if used)
+.vscode/
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+
+# IFLOW context file
+IFLOW.md
