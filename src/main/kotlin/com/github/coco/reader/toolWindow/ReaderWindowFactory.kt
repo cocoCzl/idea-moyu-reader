@@ -98,7 +98,8 @@ class ReaderWindowFactory : ToolWindowFactory {
 
             // 创建顶部工具栏
             val topToolbarPanel = JPanel(FlowLayout(FlowLayout.CENTER, 10, 5)).apply {
-                background = Color(245, 245, 245)
+                // 使用IDEA当前主题的背景色
+                background = UIManager.getColor("Panel.background")
                 border = BorderFactory.createEmptyBorder(5, 0, 5, 0)
                 
                 add(JButton("打开文件").apply {
@@ -159,7 +160,8 @@ class ReaderWindowFactory : ToolWindowFactory {
 
             // 创建底部工具栏
             val bottomToolbarPanel = JPanel(FlowLayout(FlowLayout.CENTER, 10, 5)).apply {
-                background = Color(245, 245, 245)
+                // 使用IDEA当前主题的背景色
+                background = UIManager.getColor("Panel.background")
                 border = BorderFactory.createEmptyBorder(5, 0, 5, 0)
                 
                 // 字体大小设置
