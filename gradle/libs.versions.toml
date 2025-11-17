@@ -15,7 +15,7 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 opentest4j = { group = "org.opentest4j", name = "opentest4j", version.ref = "opentest4j" }
 epublib = { group = "com.positiondev.epublib", name = "epublib-core", version = "3.1" }
 jsoup = { group = "org.jsoup", name = "jsoup", version = "1.12.1" }
-pdfbox = { group = "org.apache.pdfbox", name = "pdfbox", version = "2.0.24" }
+pdfbox = { group = "org.apache.pdfbox", name = "pdfbox", version = "3.0.6" }
 
 [plugins]
 changelog = { id = "org.jetbrains.changelog", version.ref = "changelog" }
