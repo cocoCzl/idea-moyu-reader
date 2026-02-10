@@ -25,7 +25,6 @@
 
 1. **安装插件**：
    - 通过IDE内置插件系统安装
-   - 或从JetBrains Marketplace下载安装
 
 2. **打开小说**：
    - 在IDE中打开"View" > "Tool Windows" > "Reader"（或直接搜索"Reader"）
