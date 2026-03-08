@@ -2,20 +2,33 @@ package com.github.coco.reader.util
 
 import com.github.coco.reader.model.NovelFile
 import com.github.coco.reader.model.NovelType
-import java.io.File
-import java.nio.charset.Charset
-import java.nio.file.Files
 import nl.siegmann.epublib.domain.Book
 import nl.siegmann.epublib.epub.EpubReader
-import java.io.FileInputStream
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.text.PDFTextStripper
+import java.io.File
+import java.io.FileInputStream
+import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
 
 /**
  * 小说文件解析工具类
  */
 object NovelParser {
-    
+
+    private val CHAPTER_PATTERNS = listOf(
+        Regex("""第\s*[一二三四五六七八九十百千万\d]+\s*[章节回卷集]"""),
+        Regex("""第\s*\d+\s*[章节回卷集]"""),
+        Regex("""Chapter\s*\d+""", RegexOption.IGNORE_CASE),
+        Regex("""\d+\s*[章节回卷集]"""),
+        Regex("""[章节回卷集]\s*[一二三四五六七八九十百千万\d]+"""),
+        Regex("""[章节回卷集]\s*\d+""")
+    )
+
+    private val COMBINED_PATTERN = CHAPTER_PATTERNS.map { "($it)" }.joinToString("|").toRegex(
+        setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)
+    )
+
     /**
      * 读取小说文件内容
      */
@@ -28,74 +41,123 @@ object NovelParser {
             NovelType.UNKNOWN -> throw IllegalArgumentException("Unsupported file type: ${novelFile.file.extension}")
         }
     }
-    
+
     /**
-     * 读取TXT文件内容
+     * 读取TXT文件内容 - 优化的编码检测
      */
     private fun readTxtFile(file: File): String {
         return try {
-            // 尝试不同的编码格式
-            val encodings = listOf("UTF-8", "GBK", "GB2312")
-            for (encoding in encodings) {
-                try {
-                    return Files.readString(file.toPath(), Charset.forName(encoding))
-                } catch (e: Exception) {
-                    continue
-                }
-            }
-            // 如果都失败了，使用默认编码
-            Files.readString(file.toPath())
+            val bytes = file.readBytes()
+            val encoding = detectEncoding(bytes)
+            String(bytes, Charset.forName(encoding))
         } catch (e: Exception) {
             "无法读取文件: ${e.message}"
         }
     }
-    
+
+    /**
+     * 检测文件编码 - 更高效的方式
+     */
+    private fun detectEncoding(bytes: ByteArray): String {
+        // 检查 BOM
+        if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
+            return "UTF-8"
+        }
+
+        // 尝试 UTF-8 解码
+        if (isValidUtf8(bytes)) {
+            return "UTF-8"
+        }
+
+        // 尝试 GBK
+        if (isValidGbk(bytes)) {
+            return "GBK"
+        }
+
+        // 默认 UTF-8
+        return "UTF-8"
+    }
+
+    private fun isValidUtf8(bytes: ByteArray): Boolean {
+        var i = 0
+        while (i < bytes.size) {
+            val b = bytes[i].toInt() and 0xFF
+            when {
+                b and 0x80 == 0 -> i++ // ASCII
+                b and 0xE0 == 0xC0 -> if (i + 1 >= bytes.size || bytes[i + 1].toInt() and 0xC0 != 0x80) return false else i += 2
+                b and 0xF0 == 0xE0 -> if (i + 2 >= bytes.size || bytes[i + 1].toInt() and 0xC0 != 0x80 || bytes[i + 2].toInt() and 0xC0 != 0x80) return false else i += 3
+                b and 0xF8 == 0xF0 -> if (i + 3 >= bytes.size || bytes[i + 1].toInt() and 0xC0 != 0x80 || bytes[i + 2].toInt() and 0xC0 != 0x80 || bytes[i + 3].toInt() and 0xC0 != 0x80) return false else i += 4
+                else -> return false
+            }
+        }
+        return true
+    }
+
+    private fun isValidGbk(bytes: ByteArray): Boolean {
+        var i = 0
+        while (i < bytes.size) {
+            val b = bytes[i].toInt() and 0xFF
+            if (b in 0x81..0xFE && i + 1 < bytes.size) {
+                val b2 = bytes[i + 1].toInt() and 0xFF
+                if (b2 !in 0x40..0xFE || b2 == 0x7F) {
+                    return false
+                }
+                i += 2
+            } else if (b < 0x80) {
+                i++
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+
     /**
      * 读取EPUB文件内容
      */
     private fun readEpubFile(file: File): String {
         return try {
-            val epubReader = EpubReader()
-            val book: Book = FileInputStream(file).use { epubReader.readEpub(it) }
-            
-            // 获取书名
-            val title = book.title ?: file.nameWithoutExtension
-            
-            // 获取所有章节内容
-            val contentBuilder = StringBuilder()
-            contentBuilder.append("《$title》\n\n")
-            
-            // 添加作者信息
-            if (book.metadata.authors.isNotEmpty()) {
-                val authors = book.metadata.authors.joinToString(", ") { it.firstname + " " + it.lastname }
-                contentBuilder.append("作者: $authors\n\n")
+            FileInputStream(file).use { fis ->
+                val epubReader = EpubReader()
+                val book: Book = epubReader.readEpub(fis)
+                val contentBuilder = StringBuilder()
+
+                // 书名和作者
+                book.title?.let { contentBuilder.append("《$it》\n\n") }
+                if (book.metadata.authors.isNotEmpty()) {
+                    val authors = book.metadata.authors.joinToString(", ") { 
+                        "${it.firstname ?: ""} ${it.lastname ?: ""}".trim() 
+                    }
+                    if (authors.isNotBlank()) {
+                        contentBuilder.append("作者: $authors\n\n")
+                    }
+                }
+
+                // 章节内容
+                book.contents.forEach { section ->
+                    val content = String(section.data, StandardCharsets.UTF_8)
+                    contentBuilder.append(cleanHtmlContent(content)).append("\n\n")
+                }
+
+                contentBuilder.toString()
             }
-            
-            // 添加所有章节内容
-            for (section in book.contents) {
-                val content = String(section.data, Charsets.UTF_8)
-                // 简单清理HTML标签
-                val cleanContent = cleanHtmlContent(content)
-                contentBuilder.append(cleanContent).append("\n\n")
-            }
-            
-            contentBuilder.toString()
         } catch (e: Exception) {
             "无法解析EPUB文件: ${e.message}\n文件路径: ${file.absolutePath}"
         }
     }
-    
+
     /**
-     * 读取MOBI/AZW/AZW3文件内容（简化实现，因为这些格式比较复杂）
+     * 读取MOBI/AZW/AZW3文件内容
      */
     private fun readMobiFile(file: File): String {
-        return "MOBI/AZW/AZW3格式支持待完善\n" +
-               "文件路径: ${file.absolutePath}\n" +
-               "文件大小: ${file.length()} 字节\n\n" +
-               "提示：由于MOBI/AZW/AZW3格式的复杂性，需要专门的解析库支持，" +
-               "当前版本暂时提供基础支持。"
+        return buildString {
+            append("MOBI/AZW/AZW3格式支持待完善\n\n")
+            append("文件路径: ${file.absolutePath}\n")
+            append("文件大小: ${formatFileSize(file.length())}\n\n")
+            append("提示：由于MOBI/AZW/AZW3格式的复杂性，建议转换为EPUB或TXT格式获得更好体验。")
+        }
     }
-    
+
     /**
      * 读取PDF文件内容
      */
@@ -103,65 +165,50 @@ object NovelParser {
         return try {
             PDDocument.load(file).use { document ->
                 val stripper = PDFTextStripper()
-                stripper.setStartPage(1)
-                stripper.setEndPage(document.numberOfPages)
                 val content = stripper.getText(document)
                 
-                // 简单清理PDF文本
-                val cleanContent = content
-                    .replace(Regex("[\n\r]{3,}"), "\n\n")  // 多个换行符替换为两个
-                    .replace(Regex("[ \t]+"), " ")  // 多个空格或制表符替换为单个空格
-                    .trim()
-                
-                "《${file.nameWithoutExtension}》\n\n$content"
+                buildString {
+                    append("《${file.nameWithoutExtension}》\n\n")
+                    append(content
+                        .replace(Regex("[\n\r]{3,}"), "\n\n")
+                        .replace(Regex("[ \t]+"), " ")
+                        .trim())
+                }
             }
         } catch (e: Exception) {
             "无法解析PDF文件: ${e.message}\n文件路径: ${file.absolutePath}"
         }
     }
-    
+
     /**
-     * 简单清理HTML内容，移除标签
+     * 清理HTML内容
      */
     private fun cleanHtmlContent(html: String): String {
         return html
-            .replace(Regex("<[^>]*>"), "")  // 移除HTML标签
-            .replace("&nbsp;", " ")  // 替换特殊字符
+            .replace(Regex("<[^>]*>"), "")
+            .replace("&nbsp;", " ")
             .replace("&amp;", "&")
             .replace("&lt;", "<")
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
+            .replace(Regex("\\s+"), " ")
             .trim()
     }
-    
+
     /**
      * 按章节分割小说内容
      */
     fun splitIntoChapters(content: String): List<String> {
-        // 更智能的章节分割逻辑，支持多种章节标题格式
-        val chapterPatterns = listOf(
-            """第\s*([一二三四五六七八九十百千万\d]+)\s*[章节回卷集]""",  // 中文数字章节
-            """第\s*(\d+)\s*[章节回卷集]""",  // 阿拉伯数字章节
-            """Chapter\s*(\d+)""",  // 英文数字章节
-            """(\d+)\s*[章节回卷集]""",  // 纯数字章节
-            """[章节回卷集]\s*([一二三四五六七八九十百千万\d]+)""",  // 反向中文数字章节
-            """[章节回卷集]\s*(\d+)"""  // 反向阿拉伯数字章节
-        )
-        
-        // 合并所有模式
-        val combinedPattern = chapterPatterns.joinToString("|") { "($it)" }
-        val chapterRegex = Regex(combinedPattern, setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
-        val matches = chapterRegex.findAll(content).toList()
-        
+        val matches = COMBINED_PATTERN.findAll(content).toList()
+
         if (matches.isEmpty()) {
             return listOf(content)
         }
-        
+
         val chapters = mutableListOf<String>()
         var lastIndex = 0
-        
+
         for (match in matches) {
-            // 添加前一章节的内容
             if (lastIndex < match.range.first) {
                 val chapterContent = content.substring(lastIndex, match.range.first).trim()
                 if (chapterContent.isNotEmpty()) {
@@ -170,7 +217,7 @@ object NovelParser {
             }
             lastIndex = match.range.first
         }
-        
+
         // 添加最后一章
         if (lastIndex < content.length) {
             val chapterContent = content.substring(lastIndex).trim()
@@ -178,54 +225,18 @@ object NovelParser {
                 chapters.add(chapterContent)
             }
         }
-        
+
         return chapters
     }
-    
+
     /**
-     * 获取文件编码格式
+     * 格式化文件大小
      */
-    fun detectEncoding(file: File): String {
-        return try {
-            val bytes = file.readBytes()
-            when {
-                isUtf8(bytes) -> "UTF-8"
-                isGbk(bytes) -> "GBK"
-                else -> "UTF-8" // 默认返回UTF-8
-            }
-        } catch (e: Exception) {
-            "UTF-8"
+    private fun formatFileSize(bytes: Long): String {
+        return when {
+            bytes < 1024 -> "$bytes 字节"
+            bytes < 1024 * 1024 -> String.format("%.1f KB", bytes / 1024.0)
+            else -> String.format("%.1f MB", bytes / (1024.0 * 1024))
         }
-    }
-    
-    private fun isUtf8(bytes: ByteArray): Boolean {
-        var i = 0
-        while (i < bytes.size) {
-            val utf8Byte = bytes[i].toInt() and 0xFF
-            when {
-                utf8Byte and 0x80 == 0 -> i++ // ASCII
-                utf8Byte and 0xE0 == 0xC0 -> i += 2 // 2-byte UTF-8
-                utf8Byte and 0xF0 == 0xE0 -> i += 3 // 3-byte UTF-8
-                utf8Byte and 0xF8 == 0xF0 -> i += 4 // 4-byte UTF-8
-                else -> return false
-            }
-        }
-        return true
-    }
-    
-    private fun isGbk(bytes: ByteArray): Boolean {
-        // 简单的GBK检测逻辑
-        for (i in bytes.indices) {
-            val byte = bytes[i].toInt() and 0xFF
-            if (byte >= 0x81 && byte <= 0xFE) {
-                if (i + 1 < bytes.size) {
-                    val nextByte = bytes[i + 1].toInt() and 0xFF
-                    if ((nextByte >= 0x40 && nextByte <= 0x7E) || (nextByte >= 0x80 && nextByte <= 0xFE)) {
-                        return true
-                    }
-                }
-            }
-        }
-        return false
     }
 }

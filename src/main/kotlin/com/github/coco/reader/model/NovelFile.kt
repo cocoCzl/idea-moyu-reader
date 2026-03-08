@@ -8,9 +8,7 @@ import java.io.File
 data class NovelFile(
     val file: File,
     val title: String = file.nameWithoutExtension,
-    val type: NovelType = NovelType.fromFile(file),
-    var currentPosition: Long = 0, // 当前阅读位置
-    var currentChapter: Int = 0    // 当前章节索引
+    val type: NovelType = NovelType.fromFile(file)
 )
 
 /**

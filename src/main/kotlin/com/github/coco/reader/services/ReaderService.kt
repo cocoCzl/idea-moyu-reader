@@ -3,23 +3,25 @@ package com.github.coco.reader.services
 import com.github.coco.reader.model.Bookmark
 import com.github.coco.reader.model.NovelFile
 import com.github.coco.reader.util.NovelParser
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.project.Project
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 
 @Service(Service.Level.PROJECT)
 class ReaderService(project: Project) {
+
+    private val persistenceService = ApplicationManager.getApplication().service<ReaderPersistenceService>()
 
     private val novelFiles = mutableListOf<NovelFile>()
     private var currentNovelFile: NovelFile? = null
     private var currentChapterIndex = 0
     private var chapters = mutableListOf<String>()
-    private var currentPageIndex = 0  // 当前页索引
-    private var pages = mutableListOf<String>()  // 当前章节的分页内容
-    private val readingProgress = ConcurrentHashMap<String, Triple<Int, Int, Long>>() // 文件路径 -> (章节索引, 页索引, 行号)
-    private val bookmarks = ConcurrentHashMap<String, MutableList<Bookmark>>() // 文件路径 -> 书签列表
+    private var chapterTitles = mutableListOf<String>()
+    private var currentPageIndex = 0
+    private var pages = mutableListOf<String>()
 
     init {
         thisLogger().info("ReaderService initialized for project: ${project.name}")
@@ -29,112 +31,88 @@ class ReaderService(project: Project) {
      * 打开小说文件
      */
     fun openNovelFile(file: File): Boolean {
-        try {
+        return try {
             val novelFile = NovelFile(file)
             currentNovelFile = novelFile
-            
+
             // 读取小说内容并分割章节
             val content = NovelParser.readNovelContent(novelFile)
             chapters = NovelParser.splitIntoChapters(content).toMutableList()
-            
+            chapterTitles = getChapterTitlesInternal().toMutableList()
+
             // 恢复阅读进度
-            val filePath = file.absolutePath
-            val savedProgress = readingProgress[filePath]
-            if (savedProgress != null) {
-                currentChapterIndex = savedProgress.first
-                currentPageIndex = savedProgress.second
-                // 这里可以进一步处理行号信息
-            } else {
+            val savedProgress = persistenceService.getProgress(file.absolutePath)
+            currentChapterIndex = savedProgress?.chapterIndex ?: 0
+            currentPageIndex = savedProgress?.pageIndex ?: 0
+
+            // 确保索引有效
+            if (currentChapterIndex >= chapters.size) {
                 currentChapterIndex = 0
                 currentPageIndex = 0
             }
-            
+
             // 对当前章节进行分页
-            if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                pages = splitChapterIntoPages(chapters[currentChapterIndex])
-            }
-            
+            updatePagesForCurrentChapter()
+
             novelFiles.add(novelFile)
-            return true
+            true
         } catch (e: Exception) {
             thisLogger().error("Failed to open novel file: ${e.message}")
-            return false
+            false
         }
+    }
+
+    /**
+     * 更新当前章节的分页
+     */
+    private fun updatePagesForCurrentChapter() {
+        if (chapters.isNotEmpty() && currentChapterIndex in chapters.indices) {
+            pages = splitChapterIntoPages(chapters[currentChapterIndex])
+            // 确保页索引有效
+            if (currentPageIndex >= pages.size) {
+                currentPageIndex = maxOf(0, pages.size - 1)
+            }
+        } else {
+            pages = mutableListOf()
+            currentPageIndex = 0
+        }
+    }
+
+    /**
+     * 跳转到指定章节并更新分页
+     */
+    private fun navigateToChapter(index: Int): Boolean {
+        if (index in chapters.indices) {
+            currentChapterIndex = index
+            currentPageIndex = 0
+            updatePagesForCurrentChapter()
+            saveReadingProgress()
+            return true
+        }
+        return false
     }
 
     /**
      * 获取当前页面内容
      */
     fun getCurrentPage(): String? {
-        return if (pages.isNotEmpty() && currentPageIndex >= 0 && currentPageIndex < pages.size) {
-            val content = pages[currentPageIndex]
-            // 转换为HTML格式以便在JEditorPane中显示
-            convertToHtml(content)
+        return if (pages.isNotEmpty() && currentPageIndex in pages.indices) {
+            convertToHtml(pages[currentPageIndex])
         } else {
             null
         }
-    }
-
-    /**
-     * 获取当前章节内容
-     */
-    fun getCurrentChapter(): String? {
-        return if (chapters.isNotEmpty() && currentChapterIndex >= 0 && currentChapterIndex < chapters.size) {
-            val content = chapters[currentChapterIndex]
-            // 转换为HTML格式以便在JEditorPane中显示
-            convertToHtml(content)
-        } else {
-            null
-        }
-    }
-
-    /**
-     * 获取下一章节内容
-     */
-    fun nextChapter(): String? {
-        if (currentChapterIndex < chapters.size - 1) {
-            currentChapterIndex++
-            currentPageIndex = 0  // 重置到章节第一页
-            // 对新章节进行分页
-            if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                pages = splitChapterIntoPages(chapters[currentChapterIndex])
-            }
-            saveReadingProgress()
-            return getCurrentPage()
-        }
-        return null
-    }
-
-    /**
-     * 获取上一章节内容
-     */
-    fun previousChapter(): String? {
-        if (currentChapterIndex > 0) {
-            currentChapterIndex--
-            currentPageIndex = 0  // 重置到章节第一页
-            // 对新章节进行分页
-            if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                pages = splitChapterIntoPages(chapters[currentChapterIndex])
-            }
-            saveReadingProgress()
-            return getCurrentPage()
-        }
-        return null
     }
 
     /**
      * 获取下一页内容
      */
     fun nextPage(): String? {
-        // 如果当前页不是最后一页，直接跳转到下一页
         if (currentPageIndex < pages.size - 1) {
             currentPageIndex++
             saveReadingProgress()
             return getCurrentPage()
-        }
-        // 如果当前页是最后一页，跳转到下一章
-        else if (currentChapterIndex < chapters.size - 1) {
-            return nextChapter()
+        } else if (currentChapterIndex < chapters.size - 1) {
+            return if (navigateToChapter(currentChapterIndex + 1)) getCurrentPage() else null
         }
         return null
     }
@@ -143,174 +121,103 @@ class ReaderService(project: Project) {
      * 获取上一页内容
      */
     fun previousPage(): String? {
-        // 如果当前页不是第一页，直接跳转到上一页
         if (currentPageIndex > 0) {
             currentPageIndex--
             saveReadingProgress()
             return getCurrentPage()
-        }
-        // 如果当前页是第一页，跳转到上一章的最后一页
-        else if (currentChapterIndex > 0) {
-            currentChapterIndex--
-            // 对新章节进行分页
-            if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                pages = splitChapterIntoPages(chapters[currentChapterIndex])
-                currentPageIndex = pages.size - 1  // 跳转到新章节的最后一页
+        } else if (currentChapterIndex > 0) {
+            if (navigateToChapter(currentChapterIndex - 1)) {
+                currentPageIndex = maxOf(0, pages.size - 1)
+                saveReadingProgress()
+                return getCurrentPage()
             }
-            saveReadingProgress()
-            return getCurrentPage()
         }
         return null
     }
 
     /**
-     * 获取指定页面内容
-     */
-    fun goToPage(pageIndex: Int): String? {
-        if (pageIndex >= 0 && pageIndex < pages.size) {
-            currentPageIndex = pageIndex
-            saveReadingProgress()
-            return getCurrentPage()
-        }
-        return null
-    }
-
-    /**
-     * 获取指定章节内容并跳转到该章节的第一页
+     * 跳转到指定章节
      */
     fun goToChapter(index: Int): String? {
-        if (index >= 0 && index < chapters.size) {
-            currentChapterIndex = index
-            currentPageIndex = 0  // 重置到章节第一页
-            // 对新章节进行分页
-            if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                pages = splitChapterIntoPages(chapters[currentChapterIndex])
-            }
-            saveReadingProgress()
-            return getCurrentPage()
-        }
-        return null
+        return if (navigateToChapter(index)) getCurrentPage() else null
     }
 
     /**
-     * 保存阅读进度（按文件+章节索引+页索引）
+     * 保存阅读进度
      */
     private fun saveReadingProgress() {
         currentNovelFile?.file?.absolutePath?.let { filePath ->
-            // 保存章节索引、页索引和行号
-            readingProgress[filePath] = Triple(currentChapterIndex, currentPageIndex, 0L) // 简化的行号处理
+            persistenceService.saveProgress(filePath, currentChapterIndex, currentPageIndex)
         }
-    }
-
-    /**
-     * 跳转到指定的阅读位置
-     */
-    fun goToPosition(chapterIndex: Int, lineNumber: Long): Boolean {
-        if (chapterIndex >= 0 && chapterIndex < chapters.size) {
-            currentChapterIndex = chapterIndex
-            currentPageIndex = 0  // 跳转到章节第一页
-            // 对目标章节进行分页
-            if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                pages = splitChapterIntoPages(chapters[currentChapterIndex])
-            }
-            saveReadingProgress()
-            return true
-        }
-        return false
-    }
-
-    /**
-     * 获取当前阅读进度
-     */
-    fun getCurrentProgress(): Triple<Int, Int, Long>? {
-        return currentNovelFile?.file?.absolutePath?.let { filePath ->
-            readingProgress[filePath]
-        }
-    }
-
-    /**
-     * 将章节内容分割为页面
-     */
-    private fun splitChapterIntoPages(content: String): MutableList<String> {
-        val pages = mutableListOf<String>()
-        val lines = content.lines()
-        
-        // 页面大小（可配置）
-        val linesPerPage = 50 // 每页显示的行数
-        
-        for (i in lines.indices step linesPerPage) {
-            val endIndex = minOf(i + linesPerPage, lines.size)
-            val pageContent = lines.subList(i, endIndex).joinToString("\n")
-            pages.add(pageContent)
-        }
-        
-        return pages
     }
 
     /**
      * 添加书签
      */
     fun addBookmark(title: String): Boolean {
-        currentNovelFile?.file?.absolutePath?.let { filePath ->
-            val bookmark = Bookmark(
-                novelFilePath = filePath,
-                chapterIndex = currentChapterIndex,
-                pageIndex = currentPageIndex, // 使用当前页索引
-                title = title
-            )
-            
-            val fileBookmarks = bookmarks.getOrPut(filePath) { mutableListOf() }
-            fileBookmarks.add(bookmark)
-            return true
+        val filePath = currentNovelFile?.file?.absolutePath ?: return false
+        val chapterTitle = if (currentChapterIndex in chapterTitles.indices) {
+            chapterTitles[currentChapterIndex]
+        } else {
+            "第${currentChapterIndex + 1}章"
         }
-        return false
+        
+        val bookmarkState = BookmarkState(
+            novelFilePath = filePath,
+            chapterIndex = currentChapterIndex,
+            pageIndex = currentPageIndex,
+            title = title,
+            chapterTitle = chapterTitle
+        )
+        
+        return persistenceService.addBookmark(bookmarkState)
     }
 
     /**
      * 删除书签
      */
     fun removeBookmark(bookmark: Bookmark): Boolean {
-        val fileBookmarks = bookmarks[bookmark.novelFilePath]
-        return fileBookmarks?.remove(bookmark) ?: false
+        val bookmarkState = BookmarkState(
+            novelFilePath = bookmark.novelFilePath,
+            chapterIndex = bookmark.chapterIndex,
+            pageIndex = bookmark.pageIndex,
+            title = bookmark.title,
+            timestamp = bookmark.timestamp
+        )
+        return persistenceService.removeBookmark(bookmarkState)
     }
 
     /**
      * 获取指定文件的所有书签
      */
     fun getBookmarks(novelFilePath: String): List<Bookmark> {
-        return bookmarks[novelFilePath]?.toList() ?: emptyList()
-    }
-
-    /**
-     * 获取当前文件的所有书签
-     */
-    fun getCurrentBookmarks(): List<Bookmark> {
-        return currentNovelFile?.file?.absolutePath?.let { filePath ->
-            getBookmarks(filePath)
-        } ?: emptyList()
+        return persistenceService.getBookmarks(novelFilePath).map { state ->
+            Bookmark(
+                novelFilePath = state.novelFilePath,
+                chapterIndex = state.chapterIndex,
+                pageIndex = state.pageIndex,
+                title = state.title,
+                timestamp = state.timestamp
+            )
+        }
     }
 
     /**
      * 跳转到书签位置
      */
     fun goToBookmark(bookmark: Bookmark): Boolean {
-        if (bookmark.novelFilePath == currentNovelFile?.file?.absolutePath) {
-            // 跳转到指定章节
-            if (bookmark.chapterIndex >= 0 && bookmark.chapterIndex < chapters.size) {
-                currentChapterIndex = bookmark.chapterIndex
-                // 对目标章节进行分页
-                if (chapters.isNotEmpty() && currentChapterIndex < chapters.size) {
-                    pages = splitChapterIntoPages(chapters[currentChapterIndex])
-                }
-                // 跳转到指定页码
-                if (bookmark.pageIndex >= 0 && bookmark.pageIndex < pages.size) {
-                    currentPageIndex = bookmark.pageIndex
-                } else {
-                    currentPageIndex = 0
-                }
-                saveReadingProgress()
-                return true
+        if (bookmark.novelFilePath != currentNovelFile?.file?.absolutePath) {
+            return false
+        }
+        
+        if (bookmark.chapterIndex in chapters.indices) {
+            currentChapterIndex = bookmark.chapterIndex
+            updatePagesForCurrentChapter()
+            if (bookmark.pageIndex in pages.indices) {
+                currentPageIndex = bookmark.pageIndex
             }
+            saveReadingProgress()
+            return true
         }
         return false
     }
@@ -341,31 +248,18 @@ class ReaderService(project: Project) {
     fun getCurrentNovelFile(): NovelFile? = currentNovelFile
 
     /**
-     * 搜索功能
-     */
-    fun searchInNovel(query: String): List<Pair<Int, Int>> { // 返回章节索引和行号
-        val results = mutableListOf<Pair<Int, Int>>()
-        for (i in chapters.indices) {
-            val lines = chapters[i].lines()
-            for (j in lines.indices) {
-                if (lines[j].contains(query, ignoreCase = true)) {
-                    results.add(Pair(i, j)) // (章节索引, 行号)
-                }
-            }
-        }
-        return results
-    }
-
-    /**
      * 获取所有章节标题
      */
-    fun getChapterTitles(): List<String> {
+    fun getChapterTitles(): List<String> = chapterTitles.toList()
+
+    /**
+     * 内部方法：提取章节标题
+     */
+    private fun getChapterTitlesInternal(): List<String> {
         return chapters.mapIndexed { index, chapter ->
-            // 提取章节标题
             val lines = chapter.lines()
             for (line in lines) {
                 val trimmed = line.trim()
-                // 支持多种章节标题格式
                 if (trimmed.matches(Regex("""第\s*[一二三四五六七八九十百千万\d]+\s*[章节回卷集]""")) ||
                     trimmed.matches(Regex("""第\s*\d+\s*[章节回卷集]""")) ||
                     trimmed.matches(Regex("""Chapter\s*\d+""", RegexOption.IGNORE_CASE)) ||
@@ -380,33 +274,46 @@ class ReaderService(project: Project) {
     }
 
     /**
+     * 将章节内容分割为页面
+     */
+    private fun splitChapterIntoPages(content: String): MutableList<String> {
+        val pages = mutableListOf<String>()
+        val lines = content.lines()
+        val linesPerPage = 50
+
+        for (i in lines.indices step linesPerPage) {
+            val endIndex = minOf(i + linesPerPage, lines.size)
+            val pageContent = lines.subList(i, endIndex).joinToString("\n")
+            pages.add(pageContent)
+        }
+
+        return if (pages.isEmpty()) mutableListOf("") else pages
+    }
+
+    /**
      * 转换文本内容为HTML格式
      */
     private fun convertToHtml(content: String): String {
-        val settings = com.intellij.openapi.application.ApplicationManager.getApplication()
-            .getService(com.github.coco.reader.settings.ReaderSettings::class.java)
-            
-        // 尝试获取IDEA主题的背景色和前景色
+        val settings = ApplicationManager.getApplication().getService(com.github.coco.reader.settings.ReaderSettings::class.java)
+
         val ideaBackgroundColor = try {
             val bgColor = javax.swing.UIManager.getColor("Panel.background")
                 ?: javax.swing.UIManager.getColor("TextArea.background")
-            bgColor?.let {
-                "#%02x%02x%02x".format(it.red, it.green, it.blue)
-            } ?: if (settings.nightMode) "#282c34" else "#ffffff"
+            bgColor?.let { "#%02x%02x%02x".format(it.red, it.green, it.blue) }
+                ?: if (settings.nightMode) "#282c34" else "#ffffff"
         } catch (e: Exception) {
             if (settings.nightMode) "#282c34" else "#ffffff"
         }
-        
+
         val ideaForegroundColor = try {
             val fgColor = javax.swing.UIManager.getColor("Panel.foreground")
                 ?: javax.swing.UIManager.getColor("TextArea.foreground")
-            fgColor?.let {
-                "#%02x%02x%02x".format(it.red, it.green, it.blue)
-            } ?: if (settings.nightMode) "#dcdcdc" else "#000000"
+            fgColor?.let { "#%02x%02x%02x".format(it.red, it.green, it.blue) }
+                ?: if (settings.nightMode) "#dcdcdc" else "#333333"
         } catch (e: Exception) {
-            if (settings.nightMode) "#dcdcdc" else "#000000"
+            if (settings.nightMode) "#dcdcdc" else "#333333"
         }
-        
+
         val htmlContent = content
             .replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -416,6 +323,7 @@ class ReaderService(project: Project) {
             .replace(Regex("""(第\s*\d+\s*章|Chapter\s*\d+)""", RegexOption.IGNORE_CASE)) { match ->
                 "<h2 style='color: ${settings.themeColor}; margin-top: 30px; margin-bottom: 20px; font-weight: bold;'>${match.value}</h2>"
             }
+
         return """
             <html>
             <head>
@@ -425,6 +333,8 @@ class ReaderService(project: Project) {
                         line-height: ${settings.lineSpacing};
                         background-color: ${ideaBackgroundColor};
                         color: ${ideaForegroundColor};
+                        font-family: ${settings.fontFamily}, sans-serif;
+                        font-size: ${settings.fontSize}px;
                     }
                     h2 { 
                         color: ${settings.themeColor}; 

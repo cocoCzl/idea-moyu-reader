@@ -5,6 +5,7 @@ import com.intellij.testFramework.TestDataPath
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.github.coco.reader.services.ReaderService
 import com.github.coco.reader.model.NovelFile
+import com.github.coco.reader.model.NovelType
 import java.io.File
 
 @TestDataPath("\$CONTENT_ROOT/src/test/testData")
@@ -24,8 +25,15 @@ class MyPluginTest : BasePlatformTestCase() {
         
         assertEquals(testFile, novelFile.file)
         assertEquals("test", novelFile.title)
-        assertEquals(0L, novelFile.currentPosition)
-        assertEquals(0, novelFile.currentChapter)
+        assertEquals(NovelType.TXT, novelFile.type)
+    }
+
+    fun testNovelTypeEnum() {
+        // 测试 NovelType 枚举
+        assertEquals(NovelType.TXT, NovelType.fromFile(File("test.txt")))
+        assertEquals(NovelType.EPUB, NovelType.fromFile(File("book.epub")))
+        assertEquals(NovelType.PDF, NovelType.fromFile(File("document.pdf")))
+        assertEquals(NovelType.UNKNOWN, NovelType.fromFile(File("unknown.xyz")))
     }
 
     override fun getTestDataPath() = "src/test/testData"

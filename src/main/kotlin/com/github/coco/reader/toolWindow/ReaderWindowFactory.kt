@@ -1,18 +1,29 @@
 package com.github.coco.reader.toolWindow
 
 import com.github.coco.reader.model.Bookmark
+import com.github.coco.reader.services.ReaderPersistenceService
 import com.github.coco.reader.settings.ReaderSettings
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
-import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.fileChooser.FileChooserDescriptor
+import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.content.ContentFactory
+import com.intellij.util.ui.JBUI
 import com.github.coco.reader.services.ReaderService
 import java.awt.*
+import java.awt.event.KeyAdapter
+import java.awt.event.KeyEvent
+import java.io.File
 import javax.swing.*
 import javax.swing.border.EmptyBorder
 
@@ -23,403 +34,556 @@ class ReaderWindowFactory : ToolWindowFactory {
     }
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val readerWindow = ReaderWindow(toolWindow, project)
-        val content = ContentFactory.getInstance().createContent(readerWindow.getContent(), null, false)
+        val readerPanel = ReaderPanel(toolWindow, project)
+        val content = ContentFactory.getInstance().createContent(readerPanel, null, false)
         toolWindow.contentManager.addContent(content)
     }
 
     override fun shouldBeAvailable(project: Project) = true
+}
 
-    class ReaderWindow(toolWindow: ToolWindow, private val project: Project) {
+/**
+ * 主阅读面板
+ */
+class ReaderPanel(
+    private val toolWindow: ToolWindow,
+    private val project: Project
+) : JPanel(BorderLayout()) {
 
-        private val service = project.service<ReaderService>()
-        private val settings = project.service<ReaderSettings>()
-        private val textArea = JEditorPane().apply {
-            contentType = "text/html"
-            isEditable = false
-            putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+    private val service = project.service<ReaderService>()
+    private val settings = ApplicationManager.getApplication().service<ReaderSettings>()
+    private val persistenceService = ApplicationManager.getApplication().service<ReaderPersistenceService>()
+
+    // UI 组件
+    private val textPane = JEditorPane().apply {
+        contentType = "text/html"
+        isEditable = false
+        putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        border = EmptyBorder(10, 15, 10, 15)
+    }
+
+    private val scrollPane = JBScrollPane(textPane).apply {
+        verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
+        horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        border = JBUI.Borders.empty()
+    }
+
+    private val chapterComboBox = ComboBox<String>().apply {
+        preferredSize = Dimension(200, preferredSize.height)
+        prototypeDisplayValue = "第 一百二十三 章 这是一个很长的章节标题"
+    }
+
+    private val pageLabel = JBLabel("页: 0/0").apply {
+        font = font.deriveFont(Font.PLAIN, 12f)
+    }
+
+    private val chapterLabel = JBLabel("章节: 0/0").apply {
+        font = font.deriveFont(Font.PLAIN, 12f)
+    }
+
+    private val fontSizeSpinner = JSpinner(SpinnerNumberModel(settings.fontSize, 10, 48, 2)).apply {
+        preferredSize = Dimension(60, preferredSize.height)
+    }
+
+    private var currentFile: VirtualFile? = null
+    private var isToolbarVisible = true
+
+    private val topToolbar: JPanel
+    private val bottomToolbar: JPanel
+
+    init {
+        border = JBUI.Borders.empty(8)
+        background = UIManager.getColor("Panel.background")
+
+        // 顶部工具栏
+        topToolbar = createTopToolbar()
+
+        // 底部工具栏
+        bottomToolbar = createBottomToolbar()
+
+        // 内容区域
+        val contentPanel = JPanel(BorderLayout()).apply {
+            add(scrollPane, BorderLayout.CENTER)
         }
-        private val scrollPane = JScrollPane(textArea).apply {
-            verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+
+        // 添加组件
+        add(topToolbar, BorderLayout.NORTH)
+        add(contentPanel, BorderLayout.CENTER)
+        add(bottomToolbar, BorderLayout.SOUTH)
+
+        // 设置键盘事件
+        setupKeyListener()
+
+        // 初始化显示
+        updateDisplay()
+    }
+
+    /**
+     * 创建顶部工具栏
+     */
+    private fun createTopToolbar(): JPanel {
+        return JPanel(FlowLayout(FlowLayout.CENTER, 8, 6)).apply {
+            background = UIManager.getColor("Panel.background")
+            border = JBUI.Borders.emptyTop(4)
+
+            // 打开文件按钮
+            add(createToolBarButton("打开文件", AllIcons.Actions.MenuOpen) { openFile() })
+
+            add(Box.createHorizontalStrut(16))
+
+            // 导航按钮
+            add(createToolBarButton("上一页", AllIcons.Actions.Back) { goToPreviousPage() })
+            add(pageLabel)
+            add(createToolBarButton("下一页", AllIcons.Actions.Forward) { goToNextPage() })
+
+            add(Box.createHorizontalStrut(16))
+
+            // 章节选择
+            add(JBLabel("章节:").apply { font = font.deriveFont(Font.PLAIN, 12f) })
+            chapterComboBox.addActionListener {
+                val selected = chapterComboBox.selectedItem as? String
+                if (selected != null && selected != "请先打开文件") {
+                    val titles = service.getChapterTitles()
+                    val index = titles.indexOf(selected)
+                    if (index >= 0 && index != service.getCurrentChapterIndex()) {
+                        service.goToChapter(index)
+                        updateDisplay()
+                    }
+                }
+            }
+            add(chapterComboBox)
         }
-        private val chapterLabel = JLabel("章节: 0/0").apply {
-            font = Font("SansSerif", Font.PLAIN, 12)
+    }
+
+    /**
+     * 创建底部工具栏
+     */
+    private fun createBottomToolbar(): JPanel {
+        return JPanel(FlowLayout(FlowLayout.CENTER, 8, 6)).apply {
+            background = UIManager.getColor("Panel.background")
+            border = JBUI.Borders.emptyBottom(4)
+
+            // 字体大小
+            add(JBLabel("字体大小:").apply { font = font.deriveFont(Font.PLAIN, 12f) })
+            add(fontSizeSpinner)
+            add(createToolBarButton("应用", AllIcons.Actions.Checked) { applyFontSize() })
+
+            add(Box.createHorizontalStrut(16))
+
+            // 书签功能
+            add(createToolBarButton("添加书签", AllIcons.General.Add) { addBookmark() })
+            add(createToolBarButton("书签列表", AllIcons.Actions.ListFiles) { showBookmarkDialog() })
+
+            add(Box.createHorizontalStrut(16))
+
+            // 设置按钮
+            add(createToolBarButton("设置", AllIcons.General.Settings) { showSettingsDialog() })
+
+            // 章节信息
+            add(Box.createHorizontalStrut(16))
+            add(chapterLabel)
         }
-        private val pageLabel = JLabel("页: 0/0").apply {
-            font = Font("SansSerif", Font.PLAIN, 12)
+    }
+
+    /**
+     * 创建工具栏按钮
+     */
+    private fun createToolBarButton(text: String, icon: Icon, action: () -> Unit): JButton {
+        return JButton(text, icon).apply {
+            margin = JBUI.insets(4, 8)
+            font = font.deriveFont(Font.PLAIN, 12f)
+            addActionListener { action() }
         }
-        private var currentFile: VirtualFile? = null
-        private var chapterComboBox: JComboBox<String>? = null
-        private var topToolbar: JPanel? = null
-        private var bottomToolbar: JPanel? = null
-        private var isToolbarVisible = true
-        
-        // 添加键盘事件监听器
-        init {
-            textArea.addKeyListener(object : java.awt.event.KeyAdapter() {
-                override fun keyPressed(e: java.awt.event.KeyEvent) {
-                    when (e.keyCode) {
-                        java.awt.event.KeyEvent.VK_LEFT -> {
-                            // 向左方向键，上一页
-                            service.previousPage()?.let { page ->
-                                textArea.text = page
-                                updatePageInfo()
-                                scrollToTop()
+    }
+
+    /**
+     * 设置键盘事件监听
+     */
+    private fun setupKeyListener() {
+        textPane.addKeyListener(object : KeyAdapter() {
+            override fun keyPressed(e: KeyEvent) {
+                when (e.keyCode) {
+                    KeyEvent.VK_LEFT -> goToPreviousPage()
+                    KeyEvent.VK_RIGHT -> goToNextPage()
+                    KeyEvent.VK_UP -> goToPreviousPage()
+                    KeyEvent.VK_DOWN -> goToNextPage()
+                    KeyEvent.VK_Z -> toggleToolbars(false)
+                    KeyEvent.VK_X -> toggleToolbars(true)
+                    KeyEvent.VK_ESCAPE -> toggleToolbars(true)
+                }
+            }
+        })
+        textPane.isFocusable = true
+        textPane.requestFocusInWindow()
+    }
+
+    /**
+     * 打开文件
+     */
+    private fun openFile() {
+        val descriptor = FileChooserDescriptor(true, false, false, false, false, false).apply {
+            withFileFilter { file ->
+                file.extension?.lowercase() in listOf("txt", "epub", "mobi", "azw", "azw3", "pdf")
+            }
+            title = "选择小说文件"
+        }
+
+        val chooser = FileChooserFactory.getInstance().createFileChooser(descriptor, project, null)
+        val files = chooser.choose(project, null)
+
+        if (files.isNotEmpty()) {
+            val file = files[0]
+            currentFile = file
+            if (service.openNovelFile(File(file.path))) {
+                updateDisplay()
+                updateChapterComboBox()
+                thisLogger().info("Successfully opened novel file: ${file.path}")
+            } else {
+                Messages.showErrorDialog("无法打开文件: ${file.path}", "错误")
+            }
+        }
+    }
+
+    /**
+     * 上一页
+     */
+    private fun goToPreviousPage() {
+        service.previousPage()?.let {
+            updateDisplay()
+        }
+    }
+
+    /**
+     * 下一页
+     */
+    private fun goToNextPage() {
+        service.nextPage()?.let {
+            updateDisplay()
+        }
+    }
+
+    /**
+     * 应用字体大小设置
+     */
+    private fun applyFontSize() {
+        settings.fontSize = fontSizeSpinner.value as Int
+        updateDisplay()
+    }
+
+    /**
+     * 添加书签
+     */
+    private fun addBookmark() {
+        if (currentFile == null) {
+            Messages.showWarningDialog("请先打开一个小说文件", "提示")
+            return
+        }
+
+        val title = Messages.showInputDialog(
+            project,
+            "请输入书签名称:",
+            "添加书签",
+            AllIcons.General.Add,
+            "第${service.getCurrentChapterIndex() + 1}章 第${service.getCurrentPageIndex() + 1}页",
+            null
+        )
+
+        if (!title.isNullOrBlank()) {
+            if (service.addBookmark(title.trim())) {
+                Messages.showInfoMessage("书签已添加", "成功")
+            } else {
+                Messages.showWarningDialog("该位置已存在书签", "提示")
+            }
+        }
+    }
+
+    /**
+     * 显示书签对话框
+     */
+    private fun showBookmarkDialog() {
+        val filePath = currentFile?.path
+        if (filePath == null) {
+            Messages.showWarningDialog("请先打开一个小说文件", "提示")
+            return
+        }
+
+        val bookmarks = persistenceService.getBookmarks(filePath)
+        if (bookmarks.isEmpty()) {
+            Messages.showInfoMessage("暂无书签", "书签列表")
+            return
+        }
+
+        // 创建书签列表面板
+        val listModel = DefaultListModel<String>()
+        val bookmarkList = bookmarks.mapIndexed { index, bookmark ->
+            val displayText = "${bookmark.title} - ${bookmark.chapterTitle} (第${bookmark.pageIndex + 1}页)"
+            listModel.addElement(displayText)
+            displayText to bookmark
+        }.toMap()
+
+        val bookmarkJList = JList(listModel).apply {
+            selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
+            cellRenderer = object : DefaultListCellRenderer() {
+                override fun getListCellRendererComponent(
+                    list: JList<*>?, value: Any?, index: Int,
+                    isSelected: Boolean, cellHasFocus: Boolean
+                ): Component {
+                    val c = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
+                    border = JBUI.Borders.empty(4, 8)
+                    return c
+                }
+            }
+        }
+
+        val listScrollPane = JBScrollPane(bookmarkJList).apply {
+            preferredSize = Dimension(450, 250)
+        }
+
+        // 创建按钮面板
+        val buttonPanel = JPanel(FlowLayout(FlowLayout.RIGHT)).apply {
+            add(JButton("跳转").apply {
+                addActionListener {
+                    val selected = bookmarkJList.selectedValue
+                    if (selected != null) {
+                        val bookmark = bookmarkList[selected]
+                        if (bookmark != null) {
+                            val bm = Bookmark(
+                                novelFilePath = bookmark.novelFilePath,
+                                chapterIndex = bookmark.chapterIndex,
+                                pageIndex = bookmark.pageIndex,
+                                title = bookmark.title,
+                                timestamp = bookmark.timestamp
+                            )
+                            if (service.goToBookmark(bm)) {
+                                updateDisplay()
+                                SwingUtilities.getWindowAncestor(this@ReaderPanel)?.dispose()
                             }
-                        }
-                        java.awt.event.KeyEvent.VK_RIGHT -> {
-                            // 向右方向键，下一页
-                            service.nextPage()?.let { page ->
-                                textArea.text = page
-                                updatePageInfo()
-                                scrollToTop()
-                            }
-                        }
-                        java.awt.event.KeyEvent.VK_Z -> {
-                            // Z键，隐藏所有按钮
-                            toggleToolbars(false)
-                        }
-                        java.awt.event.KeyEvent.VK_X -> {
-                            // X键，显示所有按钮
-                            toggleToolbars(true)
                         }
                     }
                 }
             })
-            
-            // 确保组件能够接收键盘焦点
-            textArea.isFocusable = true
-        }
-        
-        fun getContent() = JPanel().apply {
-            layout = BorderLayout()
-            border = EmptyBorder(10, 10, 10, 10)
-
-            // 创建顶部工具栏
-            val topToolbarPanel = JPanel(FlowLayout(FlowLayout.CENTER, 10, 5)).apply {
-                // 使用IDEA当前主题的背景色
-                background = UIManager.getColor("Panel.background")
-                border = BorderFactory.createEmptyBorder(5, 0, 5, 0)
-                
-                add(JButton("打开文件").apply {
-                    addActionListener {
-                        openFile(project)
-                    }
-                })
-                
-                add(Box.createHorizontalStrut(20))
-                
-                add(JButton("上一页").apply {
-                    addActionListener {
-                        service.previousPage()?.let { page ->
-                            textArea.text = page
-                            updatePageInfo()
-                            scrollToTop()
-                        }
-                    }
-                })
-
-                add(pageLabel)
-
-                add(JButton("下一页").apply {
-                    addActionListener {
-                        service.nextPage()?.let { page ->
-                            textArea.text = page
-                            updatePageInfo()
-                            scrollToTop()
-                        }
-                    }
-                })
-                
-                add(Box.createHorizontalStrut(20))
-                
-                // 章节选择下拉框
-                val comboBox = JComboBox<String>(arrayOf("章节选择"))
-                comboBox.addActionListener {
-                    val selected = comboBox.selectedItem as? String
-                    if (selected != null && selected != "章节选择" && selected != "无章节") {
-                        // 获取章节索引
-                        val chapterTitles = service.getChapterTitles()
-                        val chapterIndex = chapterTitles.indexOf(selected)
-                        if (chapterIndex >= 0) {
-                            // 跳转到指定章节
-                            if (service.goToChapter(chapterIndex) != null) {
-                                textArea.text = service.getCurrentPage()
-                                updateChapterInfo()
-                                updatePageInfo()
-                                scrollToTop()
-                            }
-                        }
-                    }
-                }
-                chapterComboBox = comboBox
-                add(comboBox)
-            }
-            topToolbar = topToolbarPanel
-
-            // 创建底部工具栏
-            val bottomToolbarPanel = JPanel(FlowLayout(FlowLayout.CENTER, 10, 5)).apply {
-                // 使用IDEA当前主题的背景色
-                background = UIManager.getColor("Panel.background")
-                border = BorderFactory.createEmptyBorder(5, 0, 5, 0)
-                
-                // 字体大小设置
-                add(JLabel("大小:"))
-                val fontSizeSpinner = JSpinner(SpinnerNumberModel(settings.fontSize, 8, 72, 1))
-                fontSizeSpinner.preferredSize = Dimension(60, fontSizeSpinner.preferredSize.height)
-                add(fontSizeSpinner)
-
-                add(JButton("应用").apply {
-                    addActionListener {
-                        settings.fontSize = fontSizeSpinner.value as Int
-                        applySettings()
-                    }
-                })
-                
-                add(JButton("添加书签").apply {
-                    addActionListener {
-                        val bookmarkTitle = JOptionPane.showInputDialog(
-                            null,
-                            "请输入书签名称:",
-                            "添加书签",
-                            JOptionPane.PLAIN_MESSAGE
-                        )
-                        
-                        if (bookmarkTitle != null && bookmarkTitle.trim().isNotEmpty()) {
-                            val title = bookmarkTitle.trim()
-                            if (service.addBookmark(title)) {
-                                JOptionPane.showMessageDialog(this, "书签已添加")
-                            } else {
-                                JOptionPane.showMessageDialog(this, "添加书签失败")
-                            }
-                        } else if (bookmarkTitle != null) {
-                            JOptionPane.showMessageDialog(this, "书签名称不能为空")
-                        }
-                    }
-                })
-
-                add(JButton("书签列表").apply {
-                    addActionListener {
-                        val currentFilePath = currentFile?.path
-                        if (currentFilePath != null) {
-                            val bookmarks = service.getBookmarks(currentFilePath)
-                            showBookmarkDialog(bookmarks)
-                        } else {
-                            JOptionPane.showMessageDialog(this, "请先打开一个小说文件")
-                        }
-                    }
-                })
-            }
-            bottomToolbar = bottomToolbarPanel
-
-            add(topToolbarPanel, BorderLayout.NORTH)
-            add(scrollPane, BorderLayout.CENTER)
-            add(bottomToolbarPanel, BorderLayout.SOUTH)
-
-            // 初始化显示和应用设置
-            textArea.text = service.getCurrentPage() ?: "<html><body><div style='font-family: SansSerif; font-size: 16px; padding: 20px;'>请打开小说开始摸鱼</div></body></html>"
-            updateChapterInfo()
-            updatePageInfo()
-            applySettings()
-        }
-
-        private fun openFile(project: Project) {
-            val descriptor = FileChooserDescriptor(true, false, false, false, false, false)
-            descriptor.withFileFilter { file -> 
-                file.extension?.lowercase() in listOf("txt", "epub", "mobi", "azw", "azw3", "pdf") 
-            }
-            descriptor.title = "选择小说文件"
-
-            val chooser = FileChooserFactory.getInstance().createFileChooser(descriptor, project, null)
-            val files = chooser.choose(project, null)
-
-            if (files.isNotEmpty()) {
-                val file = files[0]
-                currentFile = file
-                if (service.openNovelFile(java.io.File(file.path))) {
-                    textArea.text = service.getCurrentPage()
-                    updateChapterInfo()
-                    updatePageInfo()
-                    // 更新章节选择下拉框
-                    SwingUtilities.invokeLater {
-                        chapterComboBox?.let { updateChapterComboBox(it) }
-                    }
-                    thisLogger().info("Successfully opened novel file: ${file.path}")
-                } else {
-                    JOptionPane.showMessageDialog(null, "无法打开文件: ${file.path}")
-                }
-            }
-        }
-
-        private fun updateChapterInfo() {
-            val current = service.getCurrentChapterIndex() + 1
-            val total = service.getTotalChapters()
-            chapterLabel.text = "章节: $current/$total"
-        }
-
-        private fun updatePageInfo() {
-            val currentPage = service.getCurrentPageIndex() + 1
-            val totalPages = service.getCurrentPageCount()
-            pageLabel.text = "页: $currentPage/$totalPages"
-        }
-
-        private fun showBookmarkDialog(bookmarks: List<Bookmark>) {
-            if (bookmarks.isEmpty()) {
-                JOptionPane.showMessageDialog(null, "暂无书签")
-                return
-            }
-
-            // 创建自定义对话框支持多选
-            val dialog = JDialog().apply {
-                title = "书签管理"
-                isModal = true
-                defaultCloseOperation = JDialog.DISPOSE_ON_CLOSE
-            }
-            
-            // 创建列表模型和列表
-            val listModel = DefaultListModel<String>()
-            bookmarks.forEach { listModel.addElement(it.title) }
-            val bookmarkList = JList(listModel).apply {
-                selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
-            }
-            
-            // 创建主面板
-            val mainPanel = JPanel(BorderLayout()).apply {
-                border = BorderFactory.createEmptyBorder(10, 10, 10, 10)
-            }
-            
-            // 创建列表滚动面板
-            val scrollPane = JScrollPane(bookmarkList).apply {
-                preferredSize = Dimension(300, 200)
-            }
-            
-            // 创建按钮面板
-            val buttonPanel = JPanel(FlowLayout())
-            
-            val jumpButton = JButton("跳转").apply {
+            add(JButton("删除").apply {
                 addActionListener {
-                    val selectedIndices = bookmarkList.selectedIndices
-                    if (selectedIndices.isNotEmpty()) {
-                        val selectedIndex = selectedIndices[0]  // 只跳转到第一个选中的书签
-                        val selectedBookmark = bookmarks[selectedIndex]
-                        if (service.goToBookmark(selectedBookmark)) {
-                            textArea.text = service.getCurrentPage()
-                            updateChapterInfo()
-                            updatePageInfo()
-                            scrollToTop()
-                            dialog.dispose()
-                        } else {
-                            JOptionPane.showMessageDialog(dialog, "跳转到书签失败")
-                        }
-                    } else {
-                        JOptionPane.showMessageDialog(dialog, "请选择一个书签")
-                    }
-                }
-            }
-            
-            val deleteButton = JButton("删除").apply {
-                addActionListener {
-                    val selectedIndices = bookmarkList.selectedIndices
-                    if (selectedIndices.isNotEmpty()) {
-                        val selectedBookmarks = selectedIndices.map { bookmarks[it] }
-                        val confirm = JOptionPane.showConfirmDialog(
-                            dialog,
-                            "确定要删除选中的 ${selectedBookmarks.size} 个书签吗？",
+                    val selectedValues = bookmarkJList.selectedValuesList
+                    if (selectedValues.isNotEmpty()) {
+                        val result = Messages.showYesNoDialog(
+                            project,
+                            "确定要删除选中的 ${selectedValues.size} 个书签吗？",
                             "确认删除",
-                            JOptionPane.YES_NO_OPTION
+                            Messages.getQuestionIcon()
                         )
-                        
-                        if (confirm == JOptionPane.YES_OPTION) {
-                            var successCount = 0
-                            selectedBookmarks.forEach { bookmark ->
-                                if (service.removeBookmark(bookmark)) {
-                                    successCount++
+                        if (result == Messages.YES) {
+                            selectedValues.forEach { displayText ->
+                                bookmarkList[displayText]?.let { bookmark ->
+                                    persistenceService.removeBookmark(bookmark)
                                 }
+                                listModel.removeElement(displayText)
                             }
-                            // 从列表模型中移除已删除的书签
-                            selectedIndices.sortedDescending().forEach { index ->
-                                listModel.remove(index)
-                            }
-                            JOptionPane.showMessageDialog(dialog, "成功删除 $successCount 个书签")
                         }
-                    } else {
-                        JOptionPane.showMessageDialog(dialog, "请选择要删除的书签")
                     }
                 }
-            }
-            
-            val cancelButton = JButton("取消").apply {
+            })
+            add(JButton("关闭").apply {
                 addActionListener {
-                    dialog.dispose()
+                    SwingUtilities.getWindowAncestor(this@ReaderPanel)?.dispose()
                 }
+            })
+        }
+
+        // 创建对话框内容
+        val dialogPanel = JPanel(BorderLayout(8, 8)).apply {
+            border = JBUI.Borders.empty(12)
+            add(JBLabel("书签列表 (${bookmarks.size})").apply {
+                font = font.deriveFont(Font.BOLD, 14f)
+            }, BorderLayout.NORTH)
+            add(listScrollPane, BorderLayout.CENTER)
+            add(buttonPanel, BorderLayout.SOUTH)
+        }
+
+        // 显示对话框
+        val dialog = JDialog(SwingUtilities.getWindowAncestor(this) as Frame?, "书签管理", true).apply {
+            contentPane = dialogPanel
+            pack()
+            setLocationRelativeTo(this@ReaderPanel)
+            defaultCloseOperation = JDialog.DISPOSE_ON_CLOSE
+        }
+        dialog.isVisible = true
+    }
+
+    /**
+     * 显示设置对话框
+     */
+    private fun showSettingsDialog() {
+        val fontSizeSpinner = JSpinner(SpinnerNumberModel(settings.fontSize, 10, 48, 2)).apply {
+            preferredSize = Dimension(80, preferredSize.height)
+        }
+        val fontFamilyField = JTextField(settings.fontFamily, 20)
+        val lineSpacingSpinner = JSpinner(SpinnerNumberModel(settings.lineSpacing.toDouble(), 1.0, 3.0, 0.1)).apply {
+            preferredSize = Dimension(80, preferredSize.height)
+        }
+        val pageMarginSpinner = JSpinner(SpinnerNumberModel(settings.pageMargin, 0, 100, 5)).apply {
+            preferredSize = Dimension(80, preferredSize.height)
+        }
+        val nightModeCheckbox = JCheckBox().apply { isSelected = settings.nightMode }
+        val themeColorField = JTextField(settings.themeColor, 10)
+
+        val panel = JPanel(GridBagLayout()).apply {
+            border = JBUI.Borders.empty(12)
+            val gbc = GridBagConstraints().apply {
+                anchor = GridBagConstraints.WEST
+                insets = JBUI.insets(4, 0, 4, 12)
             }
-            
-            buttonPanel.add(jumpButton)
-            buttonPanel.add(deleteButton)
-            buttonPanel.add(cancelButton)
-            
-            mainPanel.add(scrollPane, BorderLayout.CENTER)
-            mainPanel.add(buttonPanel, BorderLayout.SOUTH)
-            
-            dialog.contentPane = mainPanel
-            dialog.pack()
-            dialog.setLocationRelativeTo(null)
-            dialog.isVisible = true
+
+            // 字体大小
+            add(JBLabel("字体大小:"), gbc.apply { gridx = 0; gridy = 0 })
+            add(fontSizeSpinner, gbc.apply { gridx = 1; gridy = 0 })
+
+            // 字体名称
+            add(JBLabel("字体名称:"), gbc.apply { gridx = 0; gridy = 1 })
+            add(fontFamilyField, gbc.apply { gridx = 1; gridy = 1 })
+
+            // 行间距
+            add(JBLabel("行间距:"), gbc.apply { gridx = 0; gridy = 2 })
+            add(lineSpacingSpinner, gbc.apply { gridx = 1; gridy = 2 })
+
+            // 页边距
+            add(JBLabel("页边距:"), gbc.apply { gridx = 0; gridy = 3 })
+            add(pageMarginSpinner, gbc.apply { gridx = 1; gridy = 3 })
+
+            // 夜间模式
+            add(JBLabel("夜间模式:"), gbc.apply { gridx = 0; gridy = 4 })
+            add(nightModeCheckbox, gbc.apply { gridx = 1; gridy = 4 })
+
+            // 主题色
+            add(JBLabel("标题颜色:"), gbc.apply { gridx = 0; gridy = 5 })
+            add(themeColorField, gbc.apply { gridx = 1; gridy = 5 })
         }
-        
-        private fun scrollToTop() {
-            SwingUtilities.invokeLater {
-                scrollPane.verticalScrollBar.value = 0
-            }
-        }
-        
-        private fun toggleToolbars(visible: Boolean) {
-            topToolbar?.isVisible = visible
-            bottomToolbar?.isVisible = visible
-            isToolbarVisible = visible
-            
-            // 重新验证布局
-            topToolbar?.revalidate()
-            bottomToolbar?.revalidate()
-            topToolbar?.parent?.revalidate()
-            bottomToolbar?.parent?.revalidate()
-        }
-        
-        private fun getChapterComboBox(): JComboBox<String>? {
-            return chapterComboBox
-        }
-        
-        private fun updateChapterComboBox(comboBox: JComboBox<String>) {
-            // 清空现有选项
-            comboBox.removeAllItems()
-            
-            // 获取章节标题
-            val chapterTitles = service.getChapterTitles()
-            
-            // 添加章节选项
-            if (chapterTitles.isNotEmpty()) {
-                for (title in chapterTitles) {
-                    comboBox.addItem(title)
+
+        // 按钮面板
+        var confirmed = false
+        val buttonPanel = JPanel(FlowLayout(FlowLayout.RIGHT)).apply {
+            add(JButton("应用").apply {
+                addActionListener {
+                    confirmed = true
+                    SwingUtilities.getWindowAncestor(this)?.dispose()
                 }
-            } else {
-                comboBox.addItem("无章节")
-            }
+            })
+            add(JButton("取消").apply {
+                addActionListener {
+                    SwingUtilities.getWindowAncestor(this)?.dispose()
+                }
+            })
         }
-        
-        private fun applySettings() {
-            // 应用字体设置到JEditorPane组件
-            val font = Font(settings.fontFamily, Font.PLAIN, settings.fontSize)
-            textArea.font = font
-            
-            // 重新加载当前内容以应用新的字体和样式设置
-            val currentContent = service.getCurrentPage()
-            if (currentContent != null) {
-                textArea.text = currentContent
-            }
-            
-            // 重新应用滚动位置
-            scrollToTop()
+
+        val dialogPanel = JPanel(BorderLayout()).apply {
+            add(panel, BorderLayout.CENTER)
+            add(buttonPanel, BorderLayout.SOUTH)
+        }
+
+        val dialog = JDialog(SwingUtilities.getWindowAncestor(this) as Frame?, "阅读设置", true).apply {
+            contentPane = dialogPanel
+            pack()
+            setLocationRelativeTo(this@ReaderPanel)
+            defaultCloseOperation = JDialog.DISPOSE_ON_CLOSE
+        }
+        dialog.isVisible = true
+
+        if (confirmed) {
+            settings.fontSize = fontSizeSpinner.value as Int
+            settings.fontFamily = fontFamilyField.text
+            settings.lineSpacing = (lineSpacingSpinner.value as Double).toFloat()
+            settings.pageMargin = pageMarginSpinner.value as Int
+            settings.nightMode = nightModeCheckbox.isSelected
+            settings.themeColor = themeColorField.text
+
+            this@ReaderPanel.fontSizeSpinner.value = settings.fontSize
+            updateDisplay()
+        }
+    }
+
+    /**
+     * 切换工具栏显示/隐藏
+     */
+    private fun toggleToolbars(visible: Boolean) {
+        topToolbar.isVisible = visible
+        bottomToolbar.isVisible = visible
+        isToolbarVisible = visible
+
+        if (visible) {
+            textPane.requestFocusInWindow()
+        }
+    }
+
+    /**
+     * 更新显示内容
+     */
+    private fun updateDisplay() {
+        val content = service.getCurrentPage()
+        if (content != null) {
+            textPane.text = content
+        } else {
+            textPane.text = """
+                <html>
+                <head>
+                    <style>
+                        body { 
+                            font-family: sans-serif; 
+                            padding: 40px; 
+                            text-align: center;
+                            color: #666;
+                        }
+                        h2 { color: #4a90d9; margin-bottom: 20px; }
+                        p { line-height: 1.8; margin: 10px 0; }
+                        .shortcut { 
+                            background: #f5f5f5; 
+                            padding: 2px 8px; 
+                            border-radius: 4px; 
+                            font-family: monospace;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h2>欢迎使用摸鱼阅读器</h2>
+                    <p>点击 <b>打开文件</b> 开始阅读</p>
+                    <p>支持格式: TXT, EPUB, MOBI, AZW, AZW3, PDF</p>
+                    <hr style="margin: 20px 0; border: none; border-top: 1px solid #eee;">
+                    <p><b>快捷键:</b></p>
+                    <p><span class="shortcut">←</span> <span class="shortcut">→</span> 翻页</p>
+                    <p><span class="shortcut">Z</span> 隐藏工具栏</p>
+                    <p><span class="shortcut">X</span> 显示工具栏</p>
+                </body>
+                </html>
+            """.trimIndent()
+        }
+
+        // 更新页面和章节信息
+        pageLabel.text = "页: ${service.getCurrentPageIndex() + 1}/${service.getCurrentPageCount()}"
+        chapterLabel.text = "章节: ${service.getCurrentChapterIndex() + 1}/${service.getTotalChapters()}"
+
+        // 滚动到顶部
+        SwingUtilities.invokeLater {
+            scrollPane.verticalScrollBar.value = 0
+        }
+    }
+
+    /**
+     * 更新章节下拉框
+     */
+    private fun updateChapterComboBox() {
+        chapterComboBox.removeAllItems()
+        val titles = service.getChapterTitles()
+
+        if (titles.isEmpty()) {
+            chapterComboBox.addItem("请先打开文件")
+            return
+        }
+
+        titles.forEach { chapterComboBox.addItem(it) }
+
+        // 设置当前章节
+        val currentIndex = service.getCurrentChapterIndex()
+        if (currentIndex in titles.indices) {
+            chapterComboBox.selectedIndex = currentIndex
         }
     }
 }
